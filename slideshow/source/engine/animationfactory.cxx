@@ -35,6 +35,7 @@
 #include <basegfx/polygon/b2dpolygontools.hxx>
 #include <basegfx/polygon/b2dpolypolygontools.hxx>
 
+#include <box2dtools.hxx>
 
 using namespace ::com::sun::star;
 
@@ -199,7 +200,7 @@ namespace slideshow::internal
             class PathAnimation : public NumberAnimation
             {
             public:
-                PathAnimation( const OUString&       rSVGDPath,
+                PathAnimation( const OUString&       rSVGDPath, const box2d::utils::Box2DWorldSharedPtr pBox2DWorld,
                                sal_Int16                    nAdditive,
                                const ShapeManagerSharedPtr& rShapeManager,
                                const ::basegfx::B2DVector&  rSlideSize,
@@ -212,7 +213,8 @@ namespace slideshow::internal
                     maShapeOrig(),
                     mnFlags( nFlags ),
                     mbAnimationStarted( false ),
-                    mnAdditive( nAdditive )
+                    mnAdditive( nAdditive ),
+                    mpBox2DWorld( pBox2DWorld )
                 {
                     ENSURE_OR_THROW( rShapeManager,
                                       "PathAnimation::PathAnimation(): Invalid ShapeManager" );
@@ -312,8 +314,11 @@ namespace slideshow::internal
 
                     mpAttrLayer->setPosition( rOutPos );
 
-                    if( mpShape->isContentChanged() )
+                    if( mpShape->isContentChanged() ) {
+                        if ( mpBox2DWorld->getWorldInitialized() )
+                            mpBox2DWorld->queryPositionUpdate( mpShape->getXShape(), rOutPos );
                         mpShapeManager->notifyShapeUpdate( mpShape );
+                    }
 
                     return true;
                 }
@@ -339,8 +344,174 @@ namespace slideshow::internal
                 const int                          mnFlags;
                 bool                               mbAnimationStarted;
                 sal_Int16                          mnAdditive;
+                box2d::utils::Box2DWorldSharedPtr  mpBox2DWorld;
             };
 
+            class SimulatedAnimation : public NumberAnimation
+            {
+            public:
+                SimulatedAnimation( const ::box2d::utils::Box2DWorldSharedPtr pBox2DWorld,
+                                    const double                 fDuration,
+                                    sal_Int16                    nAdditive,
+                                    const ShapeManagerSharedPtr& rShapeManager,
+                                    const ::basegfx::B2DVector&  rSlideSize,
+                                    int                          nFlags ) :
+                    mpShape(),
+                    mpAttrLayer(),
+                    mpShapeManager( rShapeManager ),
+                    maPageSize( rSlideSize ),
+                    maShapeOrig(),
+                    mnFlags( nFlags ),
+                    mbAnimationStarted( false ),
+                    mnAdditive( nAdditive ),
+                    mpBox2DBody(),
+                    mpBox2DWorld( pBox2DWorld ),
+                    mfDuration(fDuration),
+                    mfPreviousElapsedTime(0.00f),
+                    mbIsBox2dWorldStepper(false)
+                {
+                    ENSURE_OR_THROW( rShapeManager,
+                                     "SimulatedAnimation::SimulatedAnimation(): Invalid ShapeManager" );
+                }
+
+                virtual ~SimulatedAnimation() override
+                {
+                    end_();
+                }
+
+                // Animation interface
+
+                virtual void prefetch() override
+                {}
+
+                virtual void start( const AnimatableShapeSharedPtr&     rShape,
+                                    const ShapeAttributeLayerSharedPtr& rAttrLayer ) override
+                {
+                    OSL_ENSURE( !mpShape,
+                                "SimulatedAnimation::start(): Shape already set" );
+                    OSL_ENSURE( !mpAttrLayer,
+                                "SimulatedAnimation::start(): Attribute layer already set" );
+
+                    mpShape = rShape;
+                    mpAttrLayer = rAttrLayer;
+
+                    if( !(mpBox2DWorld->getWorldInitialized()) )
+                        mpBox2DWorld->initiateWorld(maPageSize);
+
+                    if( !(mpBox2DWorld->getShapesInitialized()) )
+                        mpBox2DWorld->initateAllShapesAsStaticBodies( mpShapeManager );
+
+                    ENSURE_OR_THROW( rShape,
+                                      "SimulatedAnimation::start(): Invalid shape" );
+                    ENSURE_OR_THROW( rAttrLayer,
+                                      "SimulatedAnimation::start(): Invalid attribute layer" );
+
+                    mpBox2DBody = mpBox2DWorld->makeShapeDynamic( rShape );
+
+                    // TODO(F1): Check whether _shape_ bounds are correct here.
+                    // Theoretically, our AttrLayer is way down the stack, and
+                    // we only have to consider _that_ value, not the one from
+                    // the top of the stack as returned by Shape::getBounds()
+                    if( mnAdditive == animations::AnimationAdditiveMode::SUM )
+                        maShapeOrig = mpShape->getBounds().getCenter();
+                    else
+                        maShapeOrig = mpShape->getDomBounds().getCenter();
+
+                    if( !mbAnimationStarted )
+                    {
+                        mbAnimationStarted = true;
+
+                        if( !(mnFlags & AnimationFactory::FLAG_NO_SPRITE) )
+                            mpShapeManager->enterAnimationMode( mpShape );
+                    }
+                }
+
+                virtual void end() override { end_(); }
+                void end_()
+                {
+                    if( mbIsBox2dWorldStepper )
+                    {
+                        mbIsBox2dWorldStepper = false;
+                        mpBox2DWorld->setHasWorldStepper(false);
+                    }
+
+                    if( mbAnimationStarted )
+                    {
+                        mbAnimationStarted = false;
+
+                        // Animation have ended for this body, make it static
+                        mpBox2DWorld->makeBodyStatic( mpBox2DBody );
+
+                        if( !(mnFlags & AnimationFactory::FLAG_NO_SPRITE) )
+                            mpShapeManager->leaveAnimationMode( mpShape );
+
+                        if( mpShape->isContentChanged() )
+                            mpShapeManager->notifyShapeUpdate( mpShape );
+                    }
+                }
+
+                // NumberAnimation interface
+
+
+                virtual bool operator()( double nValue ) override
+                {
+                    ENSURE_OR_RETURN_FALSE( mpAttrLayer && mpShape,
+                                       "SimulatedAnimation::operator(): Invalid ShapeAttributeLayer" );
+
+                    // if there are multiple simulated animations going in parallel
+                    // like "with previous" option. Only one of them should step
+                    // the box2d world
+                    if( !mpBox2DWorld->hasWorldStepper() )
+                    {
+                        mbIsBox2dWorldStepper = true;
+                        mpBox2DWorld->setHasWorldStepper(true);
+                    }
+
+                    if( mbIsBox2dWorldStepper )
+                    {
+                        double fPassedTime = (mfDuration * nValue) - mfPreviousElapsedTime;
+
+                        mfPreviousElapsedTime += mpBox2DWorld->stepAmount( fPassedTime );
+                    }
+
+                    ::basegfx::B2DPoint rOutPos = mpBox2DBody->getPosition( maPageSize );
+                    mpAttrLayer->setPosition( rOutPos );
+
+                    double fAngle = mpBox2DBody->getAngle();
+                    mpAttrLayer->setRotationAngle( fAngle );
+
+                    if( mpShape->isContentChanged() )
+                        mpShapeManager->notifyShapeUpdate( mpShape );
+
+                    return true;
+                }
+
+                virtual double getUnderlyingValue() const override
+                {
+                    ENSURE_OR_THROW( mpAttrLayer,
+                                      "SimulatedAnimation::getUnderlyingValue(): Invalid ShapeAttributeLayer" );
+
+                    return 0.0; // though this should be used in concert with
+                                // ActivitiesFactory::createSimpleActivity, better
+                                // explicitly name our start value.
+                                // Permissible range for operator() above is [0,1]
+                }
+
+            private:
+                AnimatableShapeSharedPtr           mpShape;
+                ShapeAttributeLayerSharedPtr       mpAttrLayer;
+                ShapeManagerSharedPtr              mpShapeManager;
+                const ::basegfx::B2DSize           maPageSize;
+                ::basegfx::B2DPoint                maShapeOrig;
+                const int                          mnFlags;
+                bool                               mbAnimationStarted;
+                sal_Int16                          mnAdditive;
+                box2d::utils::Box2DBodySharedPtr   mpBox2DBody;
+                box2d::utils::Box2DWorldSharedPtr  mpBox2DWorld;
+                double                             mfDuration;
+                double                             mfPreviousElapsedTime;
+                bool                               mbIsBox2dWorldStepper;
+            };
 
             /** GenericAnimation template
 
@@ -1215,14 +1386,28 @@ namespace slideshow::internal
             return BoolAnimationSharedPtr();
         }
 
-        NumberAnimationSharedPtr AnimationFactory::createPathMotionAnimation( const OUString&            rSVGDPath,
+        NumberAnimationSharedPtr AnimationFactory::createPathMotionAnimation( const OUString&            rSVGDPath, const box2d::utils::Box2DWorldSharedPtr pBox2DWorld,
                                                                               sal_Int16                         nAdditive,
                                                                               const AnimatableShapeSharedPtr&   /*rShape*/,
                                                                               const ShapeManagerSharedPtr&      rShapeManager,
                                                                               const ::basegfx::B2DVector&       rSlideSize,
                                                                               int                               nFlags )
         {
-            return std::make_shared<PathAnimation>( rSVGDPath, nAdditive,
+            return std::make_shared<PathAnimation>( rSVGDPath, pBox2DWorld, nAdditive,
+                                   rShapeManager,
+                                   rSlideSize,
+                                   nFlags );
+        }
+
+        NumberAnimationSharedPtr AnimationFactory::createSimulatedAnimation(  const box2d::utils::Box2DWorldSharedPtr pBox2DWorld,
+                                                                              const double                      fDuration,
+                                                                              sal_Int16                         nAdditive,
+                                                                              const AnimatableShapeSharedPtr&   /*rShape*/,
+                                                                              const ShapeManagerSharedPtr&      rShapeManager,
+                                                                              const ::basegfx::B2DVector&       rSlideSize,
+                                                                              int                               nFlags )
+        {
+            return std::make_shared<SimulatedAnimation>( pBox2DWorld, fDuration, nAdditive,
                                    rShapeManager,
                                    rSlideSize,
                                    nFlags );
