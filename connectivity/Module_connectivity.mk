@@ -82,12 +82,12 @@ $(eval $(call gb_Module_add_targets,connectivity,\
 ))
 endif
 
-ifeq ($(ENABLE_MARIADBC),TRUE)
-$(eval $(call gb_Module_add_targets,connectivity,\
-	Configuration_mysql \
-	Library_mysqlc \
-))
-endif
+#ifeq ($(ENABLE_MARIADBC),TRUE)
+#$(eval $(call gb_Module_add_targets,connectivity,\
+#	Configuration_mysql \
+#	Library_mysqlc \
+#))
+#endif
 
 ifneq ($(BUILD_POSTGRESQL_SDBC),)
 $(eval $(call gb_Module_add_targets,connectivity,\

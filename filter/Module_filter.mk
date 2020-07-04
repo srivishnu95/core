@@ -25,17 +25,12 @@ $(eval $(call gb_Module_add_targets,filter,\
 	Library_filterconfig \
     Library_icg \
 	Library_msfilter \
-	Library_odfflatxml \
-	Library_pdffilter \
 	Library_storagefd \
 	Library_svgfilter \
 	Library_graphicfilter \
-	Library_t602filter \
 	Library_textfd \
 	Library_xmlfa \
 	Library_xmlfd \
-	Library_xsltdlg \
-	Library_xsltfilter \
 	Package_docbook \
 	Package_xhtml \
 	Package_xslt \

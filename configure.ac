@@ -1591,6 +1591,11 @@ AC_ARG_ENABLE(ldap,
         [Disable LDAP support.]),
 ,enable_ldap=yes)
 
+AC_ARG_ENABLE(opencl,
+    AS_HELP_STRING([--disable-opencl],
+        [Disable OpenCL support.]),
+,enable_opencl=yes)
+
 dnl ===================================================================
 dnl Optional Packages (--with/without-)
 dnl ===================================================================
@@ -4894,19 +4899,63 @@ if test "$cross_compiling" = "yes"; then
     # Don't bother having configure look for stuff not needed for the build platform anyway
     ./configure \
         --disable-cups \
+        --disable-firebird-sdbc \
         --disable-gpgmepp \
         --disable-gstreamer-1-0 \
         --disable-gtk3 \
+        --disable-online-update \
+        --disable-opencl \
+        --disable-pch \
         --disable-pdfimport \
         --disable-postgresql-sdbc \
+        --disable-skia \
         --enable-icecream="$enable_icecream" \
-        --with-parallelism="$with_parallelism" \
         --without-doxygen \
         --without-java \
+        --without-webdav \
+        --with-parallelism="$with_parallelism" \
+        --with-theme="$with_theme" \
+        --with-tls=openssl \
         $sub_conf_opts \
         --srcdir=$srcdir \
         2>&1 | sed -e 's/^/    /'
     test -f ./config_host.mk 2>/dev/null || exit
+
+    # filter accepted build types
+    BUILD_TARGETS_WHITELIST="
+        AVMEDIA
+        BOOST
+        CLUCENE
+        DBCONNECTIVITY
+        DESKTOP
+        DYNLOADING
+        EPOXY
+        EXPAT
+        GLM
+        GRAPHITE
+        HARFBUZZ
+        ICU
+        LCMS2
+        LIBJPEG_TURBO
+        LIBLANGTAG
+        LibO
+        LIBPN
+        LIBXML2
+        LIBXSLT
+        MDDS
+        NATIVE
+        OPENSSL
+        ORCUS
+        PYTHON
+        SCRIPTING
+        ZLIB
+"
+    # converts BUILD_TYPE and whitelist into non-whitespace, newlined lists, to use grep as a filter
+    BUILD_TARGETS_WHITELIST=$(echo "$BUILD_TARGETS_WHITELIST" | sed -e '/^ *$/d' -e 's/ *//')
+    BUILD_TARGETS="$(sed -ne '/^export BUILD_TYPE=/ { s/.*=// ; s/ /\n/gp }' config_host.mk)"
+    BUILD_TARGETS="$(echo "$BUILD_TARGETS" | grep -F "$BUILD_TARGETS_WHITELIST" | tr '\n' ' ')"
+    sed -i -e "s/ BUILD_TYPE=.*$/ BUILD_TYPE=$BUILD_TARGETS/" config_host.mk
+
     cp config_host.mk ../config_build.mk
     cp config_host_lang.mk ../config_build_lang.mk
     mv config.log ../config.Build.log
@@ -11083,7 +11132,7 @@ dnl =================================================
 dnl Check whether to build with OpenCL support.
 dnl =================================================
 
-if test $_os != iOS -a $_os != Android -a "$ENABLE_FUZZERS" != "TRUE"; then
+if test $_os != iOS -a $_os != Android -a "$ENABLE_FUZZERS" != "TRUE" -a "$enable_opencl" = "yes"; then
     # OPENCL in BUILD_TYPE and HAVE_FEATURE_OPENCL tell that OpenCL is potentially available on the
     # platform (optional at run-time, used through clew).
     BUILD_TYPE="$BUILD_TYPE OPENCL"
