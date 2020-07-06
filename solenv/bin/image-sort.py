@@ -28,7 +28,7 @@ def read_icons(fname):
     images = []
     full_path = os.path.join(base_path, fname)
     if not os.path.exists(full_path):
-        print("Skipping non-existent {}\n".format(full_path))
+#        print("Skipping non-existent {}\n".format(full_path))
         return images
     with open(full_path) as fp:
         for line in fp:

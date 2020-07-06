@@ -1437,11 +1437,6 @@ AC_ARG_ENABLE(ccache,
 ]),
 ,)
 
-AC_ARG_ENABLE(64-bit,
-    AS_HELP_STRING([--enable-64-bit],
-        [Build a 64-bit LibreOffice on platforms where the normal build is 32-bit.
-         At the moment meaningful only for Windows.]), ,)
-
 libo_FUZZ_ARG_ENABLE(online-update,
     AS_HELP_STRING([--enable-online-update],
         [Enable the online update service that will check for new versions of
@@ -3338,19 +3333,11 @@ reg_get_value_64()
     reg_get_value "64" "$1"
 }
 
-if test "$_os" = "WINNT"; then
-    AC_MSG_CHECKING([whether to build a 64-bit LibreOffice])
-    if test "$enable_64_bit" = "" -o "$enable_64_bit" = "no"; then
-        AC_MSG_RESULT([no])
-        WINDOWS_SDK_ARCH="x86"
-    else
-        AC_MSG_RESULT([yes])
-        WINDOWS_SDK_ARCH="x64"
-        BITNESS_OVERRIDE=64
-    fi
-fi
 if test "$_os" = "iOS" -o "$build_cpu" != "$host_cpu"; then
-    cross_compiling="yes"
+    # To allow building Windows multi-arch releases without cross-tooling
+    if test -z "$WIN_MULTI_ARCH"; then
+        cross_compiling="yes"
+    fi
 fi
 if test "$cross_compiling" = "yes"; then
     export CROSS_COMPILING=TRUE
@@ -3501,6 +3488,104 @@ find_msvc()
     fi
 }
 
+test_cl_exe()
+{
+    AC_MSG_CHECKING([$1 compiler])
+
+    CL_PATH="$2"
+    CL_EXE_PATH="$2/cl.exe"
+
+    if test ! -f "$CL_EXE_PATH"; then
+        if test "$1" = "multi-arch"; then
+            AC_MSG_WARN([no compiler (cl.exe) in $2])
+            return 1
+        else
+            AC_MSG_ERROR([no compiler (cl.exe) in $2])
+        fi
+    fi
+
+    dnl ===========================================================
+    dnl  Check for the corresponding mspdb*.dll
+    dnl ===========================================================
+
+    # MSVC 15.0 has libraries from 14.0?
+    mspdbnum="140"
+
+    if test ! -e "$2/mspdb${mspdbnum}.dll"; then
+        AC_MSG_ERROR([No mspdb${mspdbnum}.dll in $2, Visual Studio installation broken?])
+    fi
+
+    # The compiles has to find its shared libraries
+    OLD_PATH="$PATH"
+    TEMP_PATH=`cygpath -d "$2"`
+    PATH="`cygpath -u "$TEMP_PATH"`:$PATH"
+
+    if ! "$CL_EXE_PATH" -? </dev/null >/dev/null 2>&1; then
+        AC_MSG_ERROR([no compiler (cl.exe) in $2])
+    fi
+
+    PATH="$OLD_PATH"
+
+    AC_MSG_RESULT([$CL_EXE_PATH])
+}
+
+case "$host_os" in
+cygwin*)
+    COM=MSC
+    USING_X11=
+    OS=WNT
+    RTL_OS=Windows
+    if test "$GNUMAKE_WIN_NATIVE" = "TRUE" ; then
+        P_SEP=";"
+    else
+        P_SEP=:
+    fi
+    case "$host_cpu" in
+    x86_64)
+        CPUNAME=X86_64
+        RTL_ARCH=X86_64
+        PLATFORMID=windows_x86_64
+        WINDOWS_X64=1
+        SCPDEFS="$SCPDEFS -DWINDOWS_X64"
+        WIN_HOST_ARCH="x64"
+        WIN_MULTI_ARCH="x86"
+        WIN_HOST_BITS=64
+        ;;
+    i*86)
+        CPUNAME=INTEL
+        RTL_ARCH=x86
+        PLATFORMID=windows_x86
+        WIN_HOST_ARCH="x86"
+        WIN_MULTI_ARCH="x64"
+        WIN_HOST_BITS=32
+        ;;
+    aarch64)
+        CPUNAME=ARM64
+        RTL_ARCH=arm64
+        PLATFORMID=windows_arm64
+        WINDOWS_X64=1
+        SCPDEFS="$SCPDEFS -DWINDOWS_ARM64"
+        WIN_HOST_ARCH="arm64"
+        WIN_HOST_BITS=64
+        ;;
+    *)
+        AC_MSG_ERROR([Unsupported host_cpu $host_cpu for host_os $host_os])
+        ;;
+    esac
+
+    case "$build_cpu" in
+    x86_64) WIN_BUILD_ARCH="x64" ;;
+    i*86) WIN_BUILD_ARCH="x86" ;;
+    aarch64) WIN_BUILD_ARCH="arm64" ;;
+    *)
+        AC_MSG_ERROR([Unsupported build_cpu $build_cpu for host_os $host_os])
+        ;;
+    esac
+
+    SCPDEFS="$SCPDEFS -D_MSC_VER"
+    ;;
+esac
+
 SOLARINC=
 MSBUILD_PATH=
 DEVENV=
@@ -3514,21 +3599,29 @@ if test "$_os" = "WINNT"; then
             AC_MSG_ERROR([no Visual Studio 2019 installation found])
         fi
     fi
+    AC_MSG_RESULT([])
 
-    if test "$BITNESS_OVERRIDE" = ""; then
-        if test -f "$vctest/VC/Tools/MSVC/$vcbuildnumber/bin/HostX86/x86/cl.exe"; then
-            VC_PRODUCT_DIR=$vctest/VC
-        else
-            AC_MSG_ERROR([no compiler (cl.exe) in $vctest/VC/Tools/MSVC/$vcbuildnumber/bin/HostX86/x86])
-        fi
-    else
-        if test -f "$vctest/VC/Tools/MSVC/$vcbuildnumber/bin/HostX64/x64/cl.exe"; then
-            VC_PRODUCT_DIR=$vctest/VC
-        else
-            AC_MSG_ERROR([no compiler (cl.exe) in $vctest/VC/Tools/MSVC/$vcbuildnumber/bin/HostX64/x64])
+    VC_PRODUCT_DIR="$vctest/VC"
+    COMPATH="$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber"
+
+    if test -n "$WIN_MULTI_ARCH"; then
+        MSVC_MULTI_PATH="$COMPATH/bin/Host$WIN_BUILD_ARCH/$WIN_MULTI_ARCH"
+        test_cl_exe "multi-arch" "$MSVC_MULTI_PATH"
+        if test $? -ne 0; then
+            WIN_MULTI_ARCH=""
         fi
     fi
-    AC_MSG_RESULT([$VC_PRODUCT_DIR])
+
+    MSVC_BUILD_PATH="$COMPATH/bin/Host$WIN_BUILD_ARCH/$WIN_BUILD_ARCH"
+    test_cl_exe "build" "$MSVC_BUILD_PATH"
+
+    # host must be last, as it sets CL_PATH
+    if test "$WIN_BUILD_ARCH" != "$WIN_HOST_ARCH"; then
+        MSVC_HOST_PATH="$COMPATH/bin/Host$WIN_BUILD_ARCH/$WIN_HOST_ARCH"
+        test_cl_exe "host" "$MSVC_HOST_PATH"
+    else
+        MSVC_HOST_PATH="$MSVC_BUILD_PATH"
+    fi
 
     AC_MSG_CHECKING([for short pathname of VC product directory])
     VC_PRODUCT_DIR=`win_short_path_for_make "$VC_PRODUCT_DIR"`
@@ -3562,13 +3655,13 @@ if test "$_os" = "WINNT"; then
         MSBUILD_PATH=`win_short_path_for_make "$regvalue"`
     else
         if test "$vcnumwithdot" = "16.0"; then
-            if test "$BITNESS_OVERRIDE" = ""; then
+            if test "$WIN_BUILD_ARCH" != "x64"; then
                 regvalue="$VC_PRODUCT_DIR/../MSBuild/Current/Bin"
             else
                 regvalue="$VC_PRODUCT_DIR/../MSBuild/Current/Bin/amd64"
             fi
         else
-            if test "$BITNESS_OVERRIDE" = ""; then
+            if test "$WIN_BUILD_ARCH" != "x64"; then
                 regvalue="$VC_PRODUCT_DIR/../MSBuild/$vcnumwithdot/Bin"
             else
                 regvalue="$VC_PRODUCT_DIR/../MSBuild/$vcnumwithdot/Bin/amd64"
@@ -3585,55 +3678,11 @@ if test "$_os" = "WINNT"; then
         AC_MSG_WARN([No devenv.exe found - this is expected for VC++ Build Tools])
     fi
 
-    dnl ===========================================================
-    dnl  Check for the corresponding mspdb*.dll
-    dnl ===========================================================
-
-    VC_HOST_DIR=
-    MSPDB_PATH=
-    CL_PATH=
-
-    if "$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/bin/HostX64/x64/cl.exe" -? </dev/null >/dev/null 2>&1; then
-        VC_HOST_DIR="HostX64"
-        MSPDB_PATH="$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/bin/$VC_HOST_DIR/x64"
-    else
-        VC_HOST_DIR="HostX86"
-        MSPDB_PATH="$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/bin/$VC_HOST_DIR/x86"
-    fi
-
-    if test "$BITNESS_OVERRIDE" = ""; then
-        CL_PATH="$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/bin/$VC_HOST_DIR/x86"
-    else
-        CL_PATH="$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/bin/$VC_HOST_DIR/x64"
-    fi
-
-    # MSVC 15.0 has libraries from 14.0?
-    mspdbnum="140"
-
-    if test ! -e "$MSPDB_PATH/mspdb${mspdbnum}.dll"; then
-        AC_MSG_ERROR([No mspdb${mspdbnum}.dll in $MSPDB_PATH, Visual Studio installation broken?])
-    fi
-
-    dnl The path needs to be added before cl is called
-    TEMP_PATH=`cygpath -d "$MSPDB_PATH"`
-    PATH="`cygpath -u "$TEMP_PATH"`:$PATH"
-
-    AC_MSG_CHECKING([cl.exe])
-
-    # Is there really ever a need to pass CC explicitly? Surely we can hope to get all the
-    # automagical niceness to work OK? If somebody has some unsupported compiler in some weird
-    # location, isn't it likely that lots of other things needs changes, too, and just setting CC
-    # is not enough?
-
     dnl Save the true MSVC cl.exe for use when CC/CXX is actually clang-cl,
     dnl needed when building CLR code:
     if test -z "$MSVC_CXX"; then
-        if test -f "$CL_PATH/cl.exe"; then
-            MSVC_CXX="$CL_PATH/cl.exe"
-        fi
-
         # This gives us a posix path with 8.3 filename restrictions
-        MSVC_CXX=`win_short_path_for_make "$MSVC_CXX"`
+        MSVC_CXX=`win_short_path_for_make "$MSVC_HOST_PATH/cl.exe"`
     fi
 
     if test -z "$CC"; then
@@ -3647,16 +3696,7 @@ if test "$_os" = "WINNT"; then
 
     if test -n "$CC"; then
         # Remove /cl.exe from CC case insensitive
-        AC_MSG_RESULT([found Visual C++ $vcyear ($CC)])
-        if test "$BITNESS_OVERRIDE" = ""; then
-           COMPATH="$VC_PRODUCT_DIR"
-        else
-            if test -n "$VC_PRODUCT_DIR"; then
-                COMPATH=$VC_PRODUCT_DIR
-            fi
-        fi
-
-        COMPATH="$COMPATH/Tools/MSVC/$vcbuildnumber"
+        AC_MSG_NOTICE([found Visual C++ $vcyear])
 
         export INCLUDE=`cygpath -d "$COMPATH\Include"`
 
@@ -3713,16 +3753,13 @@ if test "$_os" = "WINNT"; then
     BUILD_X64=
     CXX_X64_BINARY=
 
-    if test "$BITNESS_OVERRIDE" = ""; then
+    if test "$WIN_HOST_ARCH" = "x86"; then
         AC_MSG_CHECKING([for a x64 compiler and libraries for 64-bit Explorer extensions])
-        if test -f "$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/atlmfc/lib/x64/atls.lib" || \
-             test -f "$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/atlmfc/lib/spectre/x64/atls.lib"; then
-            if "$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/bin/$VC_HOST_DIR/x64/cl.exe" -? </dev/null >/dev/null 2>&1; then
-                BUILD_X64=TRUE
-                CXX_X64_BINARY=`win_short_path_for_make "$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/bin/$VC_HOST_DIR/x64/cl.exe"`
-            fi
-        fi
-        if test "$BUILD_X64" = TRUE; then
+        if test -f "$COMPATH/atlmfc/lib/$WIN_MULTI_ARCH/atls.lib" -o \
+             -f "$COMPATH/atlmfc/lib/spectre/$WIN_MULTI_ARCH/atls.lib"
+        then
+            BUILD_X64=TRUE
+            CXX_X64_BINARY=`win_short_path_for_make "$WIN_MULTI_PATH/cl.exe"`
             AC_MSG_RESULT([found])
         else
             AC_MSG_RESULT([not found])
@@ -3739,26 +3776,17 @@ if test "$_os" = "WINNT"; then
     # Check for 32-bit compiler to use to build the 32-bit TWAIN shim
     # needed to support TWAIN scan on both 32- and 64-bit systems
 
-    BUILD_X86=
-
-    if test "$BITNESS_OVERRIDE" = "64"; then
+    if test "$WIN_HOST_ARCH" = "x64"; then
         AC_MSG_CHECKING([for a x86 compiler and libraries for 32-bit binaries required for TWAIN support])
-        if test -n "$CXX_X86_BINARY"; then
+        if test -n "$WIN_MULTI_ARCH"; then
             BUILD_X86=TRUE
-            AC_MSG_RESULT([preset])
-        elif "$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/bin/$VC_HOST_DIR/x86/cl.exe" -? </dev/null >/dev/null 2>&1; then
-            BUILD_X86=TRUE
-            CXX_X86_BINARY=`win_short_path_for_make "$VC_PRODUCT_DIR/Tools/MSVC/$vcbuildnumber/bin/$VC_HOST_DIR/x86/cl.exe"`
+            CXX_X86_BINARY=`win_short_path_for_make "$MSVC_MULTI_PATH/cl.exe"`
             CXX_X86_BINARY+=" /arch:SSE"
             AC_MSG_RESULT([found])
         else
-            CXX_X86_BINARY=
             AC_MSG_RESULT([not found])
             AC_MSG_WARN([Installation set will not contain 32-bit binaries required for TWAIN support])
         fi
-    else
-        BUILD_X86=TRUE
-        CXX_X86_BINARY=$MSVC_CXX
     fi
     AC_SUBST(BUILD_X86)
     AC_SUBST(CXX_X86_BINARY)
@@ -4326,37 +4354,6 @@ aix*)
     P_SEP=:
     ;;
 
-cygwin*)
-    COM=MSC
-    USING_X11=
-    OS=WNT
-    RTL_OS=Windows
-    if test "$GNUMAKE_WIN_NATIVE" = "TRUE" ; then
-        P_SEP=";"
-    else
-        P_SEP=:
-    fi
-    case "$host_cpu" in
-    i*86|x86_64)
-        if test "$BITNESS_OVERRIDE" = 64; then
-            CPUNAME=X86_64
-            RTL_ARCH=X86_64
-            PLATFORMID=windows_x86_64
-            WINDOWS_X64=1
-            SCPDEFS="$SCPDEFS -DWINDOWS_X64"
-        else
-            CPUNAME=INTEL
-            RTL_ARCH=x86
-            PLATFORMID=windows_x86
-        fi
-        ;;
-    *)
-        AC_MSG_ERROR([Unsupported host_cpu $host_cpu for host_os $host_os])
-        ;;
-    esac
-    SCPDEFS="$SCPDEFS -D_MSC_VER"
-    ;;
-
 darwin*|macos*)
     COM=GCC
     USING_X11=
@@ -4752,6 +4749,10 @@ solaris*)
         ;;
     esac
     SOLARINC="$SOLARINC -I/usr/local/include"
+    ;;
+
+cygwin)
+    # Already handled
     ;;
 
 *)
@@ -5942,7 +5943,7 @@ if test "$_os" = "WINNT"; then
 
         if test -f "$WINDOWS_SDK_HOME/lib/user32.lib"; then
             have_windows_sdk_libs=yes
-        elif test -f "$WINDOWS_SDK_HOME/lib/$winsdklibsubdir/um/$WINDOWS_SDK_ARCH/user32.lib"; then
+        elif test -f "$WINDOWS_SDK_HOME/lib/$winsdklibsubdir/um/$WIN_BUILD_ARCH/user32.lib"; then
             have_windows_sdk_libs=yes
         else
             have_windows_sdk_libs=no
@@ -5989,13 +5990,13 @@ the  Windows SDK are installed.])
     if test -z "$WINDOWS_SDK_WILANGID" -a -n "$WINDOWS_SDK_HOME"; then
         WINDOWS_SDK_WILANGID=$WINDOWS_SDK_HOME/Samples/sysmgmt/msi/scripts/WiLangId.vbs
         if ! test -e "$WINDOWS_SDK_WILANGID" ; then
-            WINDOWS_SDK_WILANGID="${WINDOWS_SDK_HOME}/bin/${WINDOWS_SDK_LIB_SUBDIR}/${WINDOWS_SDK_ARCH}/WiLangId.vbs"
+            WINDOWS_SDK_WILANGID="${WINDOWS_SDK_HOME}/bin/${WINDOWS_SDK_LIB_SUBDIR}/${WIN_BUILD_ARCH}/WiLangId.vbs"
         fi
         if ! test -e "$WINDOWS_SDK_WILANGID" ; then
-            WINDOWS_SDK_WILANGID=$WINDOWS_SDK_HOME/bin/$WINDOWS_SDK_ARCH/WiLangId.vbs
+            WINDOWS_SDK_WILANGID=$WINDOWS_SDK_HOME/bin/$WIN_BUILD_ARCH/WiLangId.vbs
         fi
         if ! test -e "$WINDOWS_SDK_WILANGID" ; then
-            WINDOWS_SDK_WILANGID=$(cygpath -sm "C:/Program Files (x86)/Windows Kits/8.1/bin/$WINDOWS_SDK_ARCH/WiLangId.vbs")
+            WINDOWS_SDK_WILANGID=$(cygpath -sm "C:/Program Files (x86)/Windows Kits/8.1/bin/$WIN_BUILD_ARCH/WiLangId.vbs")
         fi
     fi
     if test -n "$with_lang" -a "$with_lang" != "en-US"; then
@@ -6023,19 +6024,19 @@ if test "$build_os" = "cygwin"; then
 
     find_winsdk
     if test -n "$winsdkbinsubdir" \
-        -a -f "$winsdktest/Bin/$winsdkbinsubdir/$WINDOWS_SDK_ARCH/midl.exe"
+        -a -f "$winsdktest/Bin/$winsdkbinsubdir/$WIN_BUILD_ARCH/midl.exe"
     then
-        MIDL_PATH=$winsdktest/Bin/$winsdkbinsubdir/$WINDOWS_SDK_ARCH
+        MIDL_PATH=$winsdktest/Bin/$winsdkbinsubdir/$WIN_BUILD_ARCH
         WINDOWS_SDK_BINDIR_NO_ARCH=$WINDOWS_SDK_HOME/Bin/$winsdkbinsubdir
-    elif test -f "$winsdktest/Bin/$WINDOWS_SDK_ARCH/midl.exe"; then
-        MIDL_PATH=$winsdktest/Bin/$WINDOWS_SDK_ARCH
+    elif test -f "$winsdktest/Bin/$WIN_BUILD_ARCH/midl.exe"; then
+        MIDL_PATH=$winsdktest/Bin/$WIN_BUILD_ARCH
         WINDOWS_SDK_BINDIR_NO_ARCH=$WINDOWS_SDK_HOME/Bin
     elif test -f "$winsdktest/Bin/midl.exe"; then
         MIDL_PATH=$winsdktest/Bin
         WINDOWS_SDK_BINDIR_NO_ARCH=$WINDOWS_SDK_HOME/Bin
     fi
     if test ! -f "$MIDL_PATH/midl.exe"; then
-        AC_MSG_ERROR([midl.exe not found in $winsdktest/Bin/$WINDOWS_SDK_ARCH, Windows SDK installation broken?])
+        AC_MSG_ERROR([midl.exe not found in $winsdktest/Bin/$WIN_BUILD_ARCH, Windows SDK installation broken?])
     else
         AC_MSG_RESULT([$MIDL_PATH/midl.exe])
     fi
@@ -6077,11 +6078,11 @@ if test "$build_os" = "cygwin"; then
     AC_MSG_CHECKING([for al.exe])
     find_winsdk
     if test -n "$winsdkbinsubdir" \
-        -a -f "$winsdktest/Bin/$winsdkbinsubdir/$WINDOWS_SDK_ARCH/al.exe"
+        -a -f "$winsdktest/Bin/$winsdkbinsubdir/$WIN_BUILD_ARCH/al.exe"
     then
-        AL_PATH="$winsdktest/Bin/$winsdkbinsubdir/$WINDOWS_SDK_ARCH"
-    elif test -f "$winsdktest/Bin/$WINDOWS_SDK_ARCH/al.exe"; then
-        AL_PATH="$winsdktest/Bin/$WINDOWS_SDK_ARCH"
+        AL_PATH="$winsdktest/Bin/$winsdkbinsubdir/$WIN_BUILD_ARCH"
+    elif test -f "$winsdktest/Bin/$WIN_BUILD_ARCH/al.exe"; then
+        AL_PATH="$winsdktest/Bin/$WIN_BUILD_ARCH"
     elif test -f "$winsdktest/Bin/al.exe"; then
         AL_PATH="$winsdktest/Bin"
     fi
@@ -6107,15 +6108,15 @@ if test "$build_os" = "cygwin"; then
     find_dotnetsdk46
     PathFormat "$frametest"
     frametest="$formatted_path"
-    if test -f "$frametest/Lib/um/$WINDOWS_SDK_ARCH/mscoree.lib"; then
+    if test -f "$frametest/Lib/um/$WIN_BUILD_ARCH/mscoree.lib"; then
         DOTNET_FRAMEWORK_HOME="$frametest"
     else
         find_winsdk
-        if test -f "$winsdktest/lib/mscoree.lib" -o -f "$winsdktest/lib/$winsdklibsubdir/um/$WINDOWS_SDK_ARCH/mscoree.lib"; then
+        if test -f "$winsdktest/lib/mscoree.lib" -o -f "$winsdktest/lib/$winsdklibsubdir/um/$WIN_BUILD_ARCH/mscoree.lib"; then
             DOTNET_FRAMEWORK_HOME="$winsdktest"
         fi
     fi
-    if test ! -f "$DOTNET_FRAMEWORK_HOME/lib/mscoree.lib" -a ! -f "$DOTNET_FRAMEWORK_HOME/lib/$winsdklibsubdir/um/$WINDOWS_SDK_ARCH/mscoree.lib" -a ! -f "$DOTNET_FRAMEWORK_HOME/Lib/um/$WINDOWS_SDK_ARCH/mscoree.lib"; then
+    if test ! -f "$DOTNET_FRAMEWORK_HOME/lib/mscoree.lib" -a ! -f "$DOTNET_FRAMEWORK_HOME/lib/$winsdklibsubdir/um/$WIN_BUILD_ARCH/mscoree.lib" -a ! -f "$DOTNET_FRAMEWORK_HOME/Lib/um/$WIN_BUILD_ARCH/mscoree.lib"; then
         AC_MSG_ERROR([mscoree.lib not found])
     fi
     AC_MSG_RESULT([found: $DOTNET_FRAMEWORK_HOME])
@@ -6309,7 +6310,7 @@ else
     SAL_TYPES_SIZEOFINT=4
     SAL_TYPES_SIZEOFLONG=4
     SAL_TYPES_SIZEOFLONGLONG=8
-    if test "$BITNESS_OVERRIDE" = ""; then
+    if test $WIN_HOST_BITS -eq 32; then
         SAL_TYPES_SIZEOFPOINTER=4
     else
         SAL_TYPES_SIZEOFPOINTER=8
@@ -7580,19 +7581,13 @@ if test "$ENABLE_JAVA" != ""; then
 
     # Windows-specific tests
     if test "$build_os" = "cygwin"; then
-        if test "$BITNESS_OVERRIDE" = 64; then
-            bitness=64
-        else
-            bitness=32
-        fi
-
         if test -z "$with_jdk_home"; then
             dnl See <https://docs.oracle.com/javase/9/migrate/toc.htm#JSMIG-GUID-EEED398E-AE37-4D12-
             dnl AB10-49F82F720027> section "Windows Registry Key Changes":
-            reg_get_value "$bitness" "HKEY_LOCAL_MACHINE/SOFTWARE/JavaSoft/JDK/CurrentVersion"
+            reg_get_value "$WIN_HOST_BITS" "HKEY_LOCAL_MACHINE/SOFTWARE/JavaSoft/JDK/CurrentVersion"
             if test -n "$regvalue"; then
                 ver=$regvalue
-                reg_get_value "$bitness" "HKEY_LOCAL_MACHINE/SOFTWARE/JavaSoft/JDK/$ver/JavaHome"
+                reg_get_value "$WIN_HOST_BITS" "HKEY_LOCAL_MACHINE/SOFTWARE/JavaSoft/JDK/$ver/JavaHome"
                 _jdk_home=$regvalue
             fi
 
@@ -7600,7 +7595,7 @@ if test "$ENABLE_JAVA" != ""; then
                 with_jdk_home="$_jdk_home"
                 howfound="found automatically"
             else
-                AC_MSG_ERROR([No JDK found, pass the --with-jdk-home option pointing to a $bitness-bit JDK >= 9])
+                AC_MSG_ERROR([No JDK found, pass the --with-jdk-home option pointing to a $WIN_HOST_BITS-bit JDK >= 9])
             fi
         else
             test "$build_os" = "cygwin" && with_jdk_home=`win_short_path_for_make "$with_jdk_home"`
@@ -7632,10 +7627,10 @@ if test "$ENABLE_JAVA" != ""; then
     dnl loaded by java to run JunitTests:
     if test "$build_os" = "cygwin"; then
         shortjdkhome=`cygpath -d "$with_jdk_home"`
-        if test "$BITNESS_OVERRIDE" = 64 -a -f "$with_jdk_home/bin/java.exe" -a "`$shortjdkhome/bin/java.exe -version 2>&1 | $GREP -i 64-bit`" = "" >/dev/null; then
+        if test $WIN_HOST_BITS = 64 -a -f "$with_jdk_home/bin/java.exe" -a "`$shortjdkhome/bin/java.exe -version 2>&1 | $GREP -i 64-bit`" = "" >/dev/null; then
             AC_MSG_WARN([You are building 64-bit binaries but the JDK $howfound is 32-bit])
             AC_MSG_ERROR([You should pass the --with-jdk-home option pointing to a 64-bit JDK])
-        elif test "$BITNESS_OVERRIDE" = "" -a -f "$_jdk_home/bin/java.exe" -a "`$shortjdkhome/bin/java.exe -version 2>&1 | $GREP -i 64-bit`" != ""  >/dev/null; then
+        elif test $WIN_HOST_BITS = 32 -a -f "$_jdk_home/bin/java.exe" -a "`$shortjdkhome/bin/java.exe -version 2>&1 | $GREP -i 64-bit`" != ""  >/dev/null; then
             AC_MSG_WARN([You are building 32-bit binaries but the JDK $howfound is 64-bit])
             AC_MSG_ERROR([You should pass the --with-jdk-home option pointing to a (32-bit) JDK])
         fi
@@ -8816,12 +8811,12 @@ else
     SYSTEM_LIBXSLT=
     BUILD_TYPE="$BUILD_TYPE LIBXSLT"
 
-    if test "$cross_compiling" = "yes"; then
-        AC_PATH_PROG(XSLTPROC, xsltproc, no)
-        if test "$XSLTPROC" = "no"; then
-            AC_MSG_ERROR([xsltproc is required])
-        fi
-    fi
+#    if test "$cross_compiling" = "yes"; then
+#        AC_PATH_PROG(XSLTPROC, xsltproc, no)
+#        if test "$XSLTPROC" = "no"; then
+#            AC_MSG_ERROR([xsltproc is required])
+#        fi
+#    fi
 fi
 AC_SUBST(SYSTEM_LIBXSLT)
 if test -z "$SYSTEM_LIBXSLT_FOR_BUILD"; then
@@ -9782,6 +9777,7 @@ if test -n "$with_tls"; then
     openssl)
         AC_DEFINE(USE_TLS_OPENSSL)
         TLS=OPENSSL
+        AC_MSG_RESULT([$TLS])
 
         if test "$enable_openssl" != "yes"; then
             AC_MSG_ERROR(["Disabling OpenSSL was requested, but the requested TLS to use is actually OpenSSL."])
@@ -9794,11 +9790,14 @@ if test -n "$with_tls"; then
     nss)
         AC_DEFINE(USE_TLS_NSS)
         TLS=NSS
+        AC_MSG_RESULT([$TLS])
         ;;
     no)
+        AC_MSG_RESULT([none])
         AC_MSG_WARN([Skipping TLS/SSL])
         ;;
     *)
+        AC_MSG_RESULT([])
         AC_MSG_ERROR([unsupported implementation $with_tls. Supported are:
 openssl - OpenSSL
 nss - Mozilla's Network Security Services (NSS)
@@ -9809,8 +9808,8 @@ else
     # default to using NSS, it results in smaller oox lib
     AC_DEFINE(USE_TLS_NSS)
     TLS=NSS
+    AC_MSG_RESULT([$TLS])
 fi
-AC_MSG_RESULT([$TLS])
 AC_SUBST(TLS)
 
 dnl ===================================================================
@@ -10744,18 +10743,18 @@ dnl testing assembler path
 dnl ***************************************
 ML_EXE=""
 if test "$_os" = "WINNT"; then
-    if test "$BITNESS_OVERRIDE" = ""; then
-        assembler=ml.exe
-    else
-        assembler=ml64.exe
-    fi
+    case "$WIN_HOST_ARCH" in
+    x86) assembler=ml.exe ;;
+    x64) assembler=ml64.exe ;;
+    arm64) assembler=armasm64.exe ;;
+    esac
 
     AC_MSG_CHECKING([for the MSVC assembler ($assembler)])
-    if test -f "$CL_PATH/$assembler"; then
-        ML_EXE=`win_short_path_for_make "$CL_PATH/$assembler"`
+    if test -f "$MSVC_HOST_PATH/$assembler"; then
+        ML_EXE=`win_short_path_for_make "$MSVC_HOST_PATH/$assembler"`
         AC_MSG_RESULT([$ML_EXE])
     else
-        AC_MSG_ERROR([not found])
+        AC_MSG_ERROR([not found in $MSVC_HOST_PATH])
     fi
 fi
 
@@ -11289,11 +11288,7 @@ if test "$ENABLE_SKIA" = TRUE -a "$COM_IS_CLANG" != TRUE; then
             if test -x "$VC_PRODUCT_DIR/Tools/Llvm/bin/clang-cl.exe"; then
                 CLANG_CC=`win_short_path_for_make "$VC_PRODUCT_DIR/Tools/Llvm/bin/clang-cl.exe"`
                 dnl explicitly set -m32/-m64
-                if test "$BITNESS_OVERRIDE" = ""; then
-                    CLANG_CC="$CLANG_CC -m32"
-                else
-                    CLANG_CC="$CLANG_CC -m64"
-                fi
+                CLANG_CC="$CLANG_CC -m$WIN_HOST_BITS"
                 CLANG_CXX="$CLANG_CC"
                 AC_MSG_RESULT([$CLANG_CC])
             else
@@ -11579,7 +11574,7 @@ elif test "$_os" = "Linux" -o "$_os" = "Darwin" -o "$_os" = "WINNT" ; then
         if test "$_os" != "WINNT"; then
             GPG_ERROR_LIBS="-L${WORKDIR}/UnpackedTarball/libgpg-error/src/.libs -lgpg-error"
             LIBASSUAN_LIBS="-L${WORKDIR}/UnpackedTarball/libassuan/src/.libs -lassuan"
-        elif test "$host_cpu" = "i686" -a "$WINDOWS_SDK_ARCH" = "x64"; then
+        elif test "$host_cpu" = "i686" -a "$WIN_BUILD_ARCH" = "x64"; then
             AC_MSG_ERROR(gpgme cannot be built on cygwin32 for Win64.)
         fi
     fi
@@ -13230,37 +13225,22 @@ if test "$build_os" = "cygwin"; then
         ILIB="$ILIB;$JAVA_HOME/lib"
     fi
     ILIB1=-link
-    if test "$BITNESS_OVERRIDE" = 64; then
-        ILIB="$ILIB;$COMPATH/lib/x64"
-        ILIB1="$ILIB1 -LIBPATH:$COMPATH/lib/x64"
-        ILIB="$ILIB;$WINDOWS_SDK_HOME/lib/x64"
-        ILIB1="$ILIB1 -LIBPATH:$WINDOWS_SDK_HOME/lib/x64"
-        if test $WINDOWS_SDK_VERSION = 80 -o $WINDOWS_SDK_VERSION = 81 -o $WINDOWS_SDK_VERSION = 10; then
-            ILIB="$ILIB;$WINDOWS_SDK_HOME/lib/$winsdklibsubdir/um/x64"
-            ILIB1="$ILIB1 -LIBPATH:$WINDOWS_SDK_HOME/lib/$winsdklibsubdir/um/x64"
-        fi
-        PathFormat "${UCRTSDKDIR}lib/$UCRTVERSION/ucrt/x64"
-        ucrtlibpath_formatted=$formatted_path
-        ILIB="$ILIB;$ucrtlibpath_formatted"
-        ILIB1="$ILIB1 -LIBPATH:$ucrtlibpath_formatted"
-    else
-        ILIB="$ILIB;$COMPATH/lib/x86"
-        ILIB1="$ILIB1 -LIBPATH:$COMPATH/lib/x86"
-        ILIB="$ILIB;$WINDOWS_SDK_HOME/lib"
-        ILIB1="$ILIB1 -LIBPATH:$WINDOWS_SDK_HOME/lib"
-        if test $WINDOWS_SDK_VERSION = 80 -o $WINDOWS_SDK_VERSION = 81 -o $WINDOWS_SDK_VERSION = 10; then
-            ILIB="$ILIB;$WINDOWS_SDK_HOME/lib/$winsdklibsubdir/um/x86"
-            ILIB1="$ILIB1 -LIBPATH:$WINDOWS_SDK_HOME/lib/$winsdklibsubdir/um/x86"
-        fi
-        PathFormat "${UCRTSDKDIR}lib/$UCRTVERSION/ucrt/x86"
-        ucrtlibpath_formatted=$formatted_path
-        ILIB="$ILIB;$ucrtlibpath_formatted"
-        ILIB1="$ILIB1 -LIBPATH:$ucrtlibpath_formatted"
+    ILIB="$ILIB;$COMPATH/lib/$WIN_HOST_ARCH"
+    ILIB1="$ILIB1 -LIBPATH:$COMPATH/lib/$WIN_HOST_ARCH"
+    ILIB="$ILIB;$WINDOWS_SDK_HOME/lib/$WIN_HOST_ARCH"
+    ILIB1="$ILIB1 -LIBPATH:$WINDOWS_SDK_HOME/lib/$WIN_HOST_ARCH"
+    if test $WINDOWS_SDK_VERSION = 80 -o $WINDOWS_SDK_VERSION = 81 -o $WINDOWS_SDK_VERSION = 10; then
+        ILIB="$ILIB;$WINDOWS_SDK_HOME/lib/$winsdklibsubdir/um/$WIN_HOST_ARCH"
+        ILIB1="$ILIB1 -LIBPATH:$WINDOWS_SDK_HOME/lib/$winsdklibsubdir/um/$WIN_HOST_ARCH"
     fi
+    PathFormat "${UCRTSDKDIR}lib/$UCRTVERSION/ucrt/$WIN_HOST_ARCH"
+    ucrtlibpath_formatted=$formatted_path
+    ILIB="$ILIB;$ucrtlibpath_formatted"
+    ILIB1="$ILIB1 -LIBPATH:$ucrtlibpath_formatted"
     if test -f "$DOTNET_FRAMEWORK_HOME/lib/mscoree.lib"; then
         ILIB="$ILIB;$DOTNET_FRAMEWORK_HOME/lib"
     else
-        ILIB="$ILIB;$DOTNET_FRAMEWORK_HOME/Lib/um/$WINDOWS_SDK_ARCH"
+        ILIB="$ILIB;$DOTNET_FRAMEWORK_HOME/Lib/um/$WIN_BUILD_ARCH"
     fi
 
     AC_SUBST(ILIB)
@@ -13394,7 +13374,7 @@ dnl ===================================================================
 dnl Checking for active Antivirus software.
 dnl ===================================================================
 
-if test $_os = WINNT ; then
+if test $_os = WINNT -a -f "$SRC_ROOT/antivirusDetection.vbs" ; then
     AC_MSG_CHECKING([for active Antivirus software])
     ANTIVIRUS_LIST=`cscript.exe //Nologo $SRC_ROOT/antivirusDetection.vbs`
     if [ [ "$ANTIVIRUS_LIST" != "NULL" ] ]; then
@@ -13440,11 +13420,7 @@ if test "$build_os" = "cygwin"; then
         ATL_LIB="$WINDOWS_SDK_HOME/lib" # Doesn't exist for VSE
         ATL_INCLUDE="$WINDOWS_SDK_HOME/include/atl"
     fi
-    if test "$BITNESS_OVERRIDE" = 64; then
-        ATL_LIB="$ATL_LIB/x64"
-    else
-        ATL_LIB="$ATL_LIB/x86"
-    fi
+    ATL_LIB="$ATL_LIB/$WIN_HOST_ARCH"
     ATL_LIB=`win_short_path_for_make "$ATL_LIB"`
     ATL_INCLUDE=`win_short_path_for_make "$ATL_INCLUDE"`
 
@@ -13509,9 +13485,9 @@ else
         if test "$GNUMAKE_WIN_NATIVE" = "TRUE" ; then
             LO_PATH=`cygpath -p -m "$PATH"`
         fi
-        if test "$BITNESS_OVERRIDE" = 64; then
+        if test -n "$WIN_MULTI_ARCH"; then
             # needed for msi packaging
-            pathmunge "$WINDOWS_SDK_BINDIR_NO_ARCH/x86" "before"
+            pathmunge "$WINDOWS_SDK_BINDIR_NO_ARCH/$WIN_MULTI_ARCH" "before"
         fi
         # .NET 4.6 and higher don't have bin directory
         if test -f "$DOTNET_FRAMEWORK_HOME/bin"; then
@@ -13521,20 +13497,12 @@ else
         pathmunge "$CSC_PATH" "before"
         pathmunge "$MIDL_PATH" "before"
         pathmunge "$AL_PATH" "before"
-        pathmunge "$MSPDB_PATH" "before"
-        if test "$MSPDB_PATH" != "$CL_PATH" ; then
-            pathmunge "$CL_PATH" "before"
-        fi
+        pathmunge "$CL_PATH" "before"
         if test -n "$MSBUILD_PATH" ; then
             pathmunge "$MSBUILD_PATH" "before"
         fi
-        if test "$BITNESS_OVERRIDE" = 64; then
-            pathmunge "$COMPATH/bin/amd64" "before"
-            pathmunge "$WINDOWS_SDK_BINDIR_NO_ARCH/x64" "before"
-        else
-            pathmunge "$COMPATH/bin" "before"
-            pathmunge "$WINDOWS_SDK_BINDIR_NO_ARCH/x86" "before"
-        fi
+        pathmunge "$MSVC_HOST_PATH" "before"
+        pathmunge "$WINDOWS_SDK_BINDIR_NO_ARCH/$WIN_BUILD_ARCH" "before"
         if test "$ENABLE_JAVA" != ""; then
             if test -d "$JAVA_HOME/jre/bin/client"; then
                 pathmunge "$JAVA_HOME/jre/bin/client" "before"

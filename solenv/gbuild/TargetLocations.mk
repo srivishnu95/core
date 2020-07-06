@@ -372,9 +372,11 @@ endef
 define gb_Executable__get_workdir_linktargetname
 Executable/$(call gb_Executable_get_filename,$(1))
 endef
+
 define gb_Executable_get_target
 $(call gb_Executable__get_dir_for_exe,$(1))/$(call gb_Executable_get_filename,$(1))
 endef
+
 ifneq ($(CROSS_COMPILING),)
 # Can we assume this is used only for executables registered for "NONE"?
 define gb_Executable_get_target_for_build
@@ -383,6 +385,7 @@ endef
 else
 gb_Executable_get_target_for_build = $(gb_Executable_get_target)
 endif # CROSS_COMPILING
+
 define gb_Executable_get_linktarget
 $(call gb_Executable__get_workdir_linktargetname,$(1))<>$(call gb_Executable_get_target,$(1))
 endef

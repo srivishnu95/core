@@ -22,9 +22,17 @@ $(call gb_LinkTarget_get_target,$(call gb_Library_get_linktarget,gcc3_uno)) : \
 endif
 
 else ifeq ($(CPUNAME),ARM64)
+
+ifeq ($(COM),MSC)
+bridges_SELECTED_BRIDGE := msvc_win32_arm64
+bridge_exception_objects := cpp2uno uno2cpp
+bridge_noopt_objects := except
+bridge_asm_objects := call
+else
 bridges_SELECTED_BRIDGE := gcc3_ios
 bridge_noopt_objects := cpp2uno except uno2cpp
 bridge_asm_objects := ios64_helper
+endif
 
 else ifeq ($(CPUNAME),AARCH64)
 

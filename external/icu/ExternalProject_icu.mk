@@ -24,10 +24,12 @@ $(call gb_ExternalProject_get_state_target,icu,build) :
 		export LIB="$(ILIB)" \
 		&& CFLAGS="-FS $(SOLARINC) $(gb_DEBUGINFO_FLAGS)" CPPFLAGS="$(SOLARINC)" CXXFLAGS="-FS $(SOLARINC) $(gb_DEBUGINFO_FLAGS)" \
 			INSTALL=`cygpath -m /usr/bin/install` \
-			./runConfigureICU \
+			./configure \
 			$(if $(MSVC_USE_DEBUG_RUNTIME),--enable-debug --disable-release) \
-			Cygwin/MSVC --disable-extras \
-		&& $(MAKE) \
+			$(if $(CROSS_COMPILING),--build=$(BUILD_PLATFORM) --host=$(HOST_PLATFORM) \
+                --with-cross-build=$(WORKDIR_FOR_BUILD)/UnpackedTarball/icu/source) \
+			--disable-extras \
+		&& $(MAKE) $(if $(CROSS_COMPILING),DATASUBDIR=data) \
 	,source)
 	$(call gb_Trace_EndRange,icu,EXTERNAL)
 
